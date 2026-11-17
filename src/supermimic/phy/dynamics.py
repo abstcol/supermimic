@@ -61,7 +61,7 @@ class ForceDynamics(Dynamics):
   def forward(self, rep_state, action, aux_state, sim_ctx, wrench_w=None):
     if wrench_w is None:
       # Existing force-free playback can use the same trained model.
-      wrench_w = action.new_zeros(*action.shape[:-1], self.wrench_scale.numel())
+      wrench_w = action.new_zeros((*action.shape[:-1], self.wrench_scale.numel()))
     wrench = root_frame_wrench(wrench_w, aux_state) / self.wrench_scale
     if not self.use_wrench:
       wrench = torch.zeros_like(wrench)

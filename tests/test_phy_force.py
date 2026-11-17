@@ -96,6 +96,7 @@ def test_wrench_changes_conditioned_prediction_but_blind_ignores_it():
   for enabled, model in zip((True, False), models, strict=True):
     output = model(state, action, aux, ctx, wrench)[1]
     zero = model(state, action, aux, ctx, torch.zeros_like(wrench))[1]
+    torch.testing.assert_close(model(state, action, aux, ctx)[1], zero)
     if enabled:
       assert not torch.allclose(output, zero)
       da, dw = torch.autograd.grad(output.square().sum(), (action, wrench))
