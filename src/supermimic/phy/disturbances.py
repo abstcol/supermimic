@@ -10,7 +10,7 @@ import torch
 
 @dataclass
 class ExternalWrenchCfg:
-  enabled: bool = False
+  enabled: bool = True
   body_names: tuple[str, ...] = ("pelvis",)
   force_range: tuple[float, float] = (-10.0, 10.0)  # N, per world-frame axis
   torque_range: tuple[float, float] = (0.0, 0.0)  # Nm, about each body's CoM
@@ -95,6 +95,8 @@ class ExternalWrenchController:
         self.remaining,
       )
     )
+    if not self.cfg.enabled:
+      self.wrench.zero_()
     self.asset.write_external_wrench_to_sim(
       self.wrench[..., :3], self.wrench[..., 3:], body_ids=self.body_ids
     )

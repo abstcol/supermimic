@@ -8,6 +8,8 @@ from mjlab.envs import ManagerBasedRlEnv, ManagerBasedRlEnvCfg
 from mjlab.rl import RslRlVecEnvWrapper
 from mjlab.utils.torch import configure_torch_backends
 
+from supermimic.phy.disturbances import ExternalWrenchCfg
+from supermimic.phy.environment import ForceTrackingEnv
 from supermimic.utils.wandb_artifacts import download_artifact_cached
 
 
@@ -41,9 +43,16 @@ def setup_device(device: str | None = None) -> str:
 
 
 def create_env(
-  env_cfg: ManagerBasedRlEnvCfg, num_envs: int, device: str
+  env_cfg: ManagerBasedRlEnvCfg,
+  num_envs: int,
+  device: str,
+  disturbance: ExternalWrenchCfg | None = None,
 ) -> RslRlVecEnvWrapper:
   """Set ``env_cfg.scene.num_envs`` and build a wrapped RL environment."""
   env_cfg.scene.num_envs = num_envs
-  env = ManagerBasedRlEnv(cfg=env_cfg, device=device)
+  if disturbance is None:
+    env = ManagerBasedRlEnv(cfg=env_cfg, device=device)
+  else:
+    env_cfg.auto_reset = False
+    env = ForceTrackingEnv(cfg=env_cfg, device=device, disturbance=disturbance)
   return RslRlVecEnvWrapper(env)

@@ -176,7 +176,7 @@ class WorldModelEnv(ABC):
     score the post-step state against the cached reference body state, the way
     the simulator scores it before advancing the clip.
     """
-    next_aux_state, next_rep_state = self.dynamics(
+    next_aux_state, next_rep_state = self._predict(
       rep_state, action, aux_state, sim_ctx
     )
     next_joint_state = self.representation.joint_state(next_rep_state)
@@ -196,6 +196,10 @@ class WorldModelEnv(ABC):
       ref_body_ang_vel_w,
     )
     return next_aux_state, next_rep_state, next_joint_state, term_prob, reward
+
+  def _predict(self, rep_state, action, aux_state, sim_ctx):
+    """Transition hook; reward, termination, history and training stay shared."""
+    return self.dynamics(rep_state, action, aux_state, sim_ctx)
 
   def _compute_term_prob(
     self,

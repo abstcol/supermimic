@@ -82,7 +82,12 @@ def main() -> None:
     "external" if args.runner.sampling_mode == "return" else args.runner.sampling_mode
   )
 
-  env = create_env(args.env, args.num_envs, device)
+  env = create_env(
+    args.env,
+    args.num_envs,
+    device,
+    disturbance=args.runner.disturbance if args.runner.force_conditioned else None,
+  )
 
   # Init Runner
   runner = SuperMimicRunner(
