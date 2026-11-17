@@ -84,6 +84,32 @@ def test_online_wm_windows_never_cross_reset_or_score_a_teleport():
     assert all(b == a + 1 for a, b in zip(row[:-1], row[1:], strict=True))
 
 
+def test_force_windows_preserve_original_uniform_environment_sampling():
+  schema = {
+    "state": FieldSpec(1),
+    "transition_valid": FieldSpec(dtype=torch.bool),
+    "terminated": FieldSpec(dtype=torch.bool),
+    "truncated": FieldSpec(dtype=torch.bool),
+  }
+  buffer = ForceReplayBuffer(schema, 8, 2)
+  for step in range(8):
+    buffer.insert(
+      TensorDict(
+        {
+          "state": torch.tensor([[0.0], [1.0]]),
+          "transition_valid": torch.tensor([True, step == 0]),
+          "terminated": torch.zeros(2, dtype=torch.bool),
+          "truncated": torch.zeros(2, dtype=torch.bool),
+        },
+        batch_size=[2],
+      )
+    )
+  with torch.random.fork_rng():
+    torch.manual_seed(3)
+    fraction = float(buffer.sample(2, 2048)["state"][:, 0, 0].mean())
+  assert 0.45 < fraction < 0.55  # 7 windows vs 1 must not give a 7:1 env ratio.
+
+
 def test_online_sensor_history_pads_at_teleport_and_reset_without_changing_flags():
   buffer = _buffer()
   truncated_before = buffer._storage["truncated"].clone()

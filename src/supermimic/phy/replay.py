@@ -27,7 +27,14 @@ class ForceReplayBuffer(ReplayBuffer):
       length,
       chronological["transition_valid"],
     )
-    choices = torch.randint(starts.shape[0], (batch_size,), device=self.device)
+    # Keep the original env-stratified distribution, even when failures leave
+    # very different numbers of valid windows in each environment.
+    counts = torch.bincount(starts[:, 0], minlength=self.num_envs)
+    envs = torch.multinomial((counts > 0).float(), batch_size, replacement=True)
+    offsets = counts.cumsum(0) - counts
+    choices = (
+      offsets[envs] + (torch.rand(batch_size, device=self.device) * counts[envs]).long()
+    )
     pairs = starts[choices]
     storage_slots = (
       base + pairs[:, 1:] + torch.arange(length, device=self.device)
