@@ -4,13 +4,11 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-import pytest
 import torch
 from tensordict import TensorDict
 
 from supermimic.learners.policy_learner import ActorCriticPolicyLearnerCfg
 from supermimic.phy.disturbances import ExternalWrenchCfg, ExternalWrenchController
-from supermimic.phy.loop import LoopConfig
 from supermimic.phy.replay import ForceReplayBuffer
 from supermimic.phy.rollout import (
   ForcePolicyLearner,
@@ -252,15 +250,15 @@ def test_policy_gradient_crosses_forced_model_without_updating_model_weights():
   assert not env.dynamics.gain.requires_grad and env.dynamics.gain.grad is None
 
 
-@pytest.mark.parametrize(
-  "change",
-  [
-    {"cycles": 1000},
-    {"history_length": 3, "actor_obs": "rep_state"},
-    {"warmup_steps": 2},
-    {"num_envs": 1024},
-  ],
-)
-def test_loop_rejects_formal_budgets_or_inconsistent_configuration(change):
-  with pytest.raises(ValueError):
-    LoopConfig(**change).validate()
+def test_force_environment_is_opt_in_and_default_auto_reset_is_preserved(monkeypatch):
+  from supermimic.scripts import train_utils
+
+  monkeypatch.setattr(train_utils, "RslRlVecEnvWrapper", lambda env: env)
+  monkeypatch.setattr(train_utils, "ManagerBasedRlEnv", lambda **kw: ("official", kw))
+  monkeypatch.setattr(train_utils, "ForceTrackingEnv", lambda **kw: ("force", kw))
+  cfg = SimpleNamespace(scene=SimpleNamespace(num_envs=0), auto_reset=True)
+  kind, _ = train_utils.create_env(cfg, 8, "cpu")
+  assert kind == "official" and cfg.auto_reset is True
+  kind, kwargs = train_utils.create_env(cfg, 8, "cpu", ExternalWrenchCfg())
+  assert kind == "force" and cfg.auto_reset is False
+  assert kwargs["disturbance"].enabled

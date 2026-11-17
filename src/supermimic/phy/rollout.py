@@ -113,28 +113,14 @@ class ForceWorldModelEnv(MultiTaskWorldModelEnv):
       -1,
     )
 
-  def _wm_step(self, rep_state, aux_state, action, last_action, sim_ctx):
+  def _predict(self, rep_state, action, aux_state, sim_ctx):
     next_aux, next_rep = self.dynamics(
       rep_state, action, aux_state, sim_ctx, self._force_plan[:, 0]
     )
     # Fixed shapes avoid Python step counters and recompilation per horizon step.
     self._force_plan = torch.cat([self._force_plan[:, 1:], self._force_plan[:, -1:]], 1)
     self._timer_plan = torch.cat([self._timer_plan[:, 1:], self._timer_plan[:, -1:]], 1)
-    joint_state = self.representation.joint_state(next_rep)
-    ref_pos, ref_quat, ref_vel, ref_avel = self._ref_body_state
-    done = self._compute_term_prob(next_aux, ref_pos, ref_quat)
-    reward = self.representation.compute_wm_reward_from_reference(
-      next_rep,
-      next_aux,
-      joint_state,
-      action,
-      last_action,
-      ref_pos,
-      ref_quat,
-      ref_vel,
-      ref_avel,
-    )
-    return next_aux, next_rep, joint_state, done, reward
+    return next_aux, next_rep
 
 
 class ForcePolicyLearner(ActorCriticPolicyLearner):

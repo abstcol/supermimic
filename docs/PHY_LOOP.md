@@ -1,120 +1,46 @@
-# SuperMimic-Phy bounded training loop
+# Force input in the existing SuperMimic pipeline
 
-This phase builds on the separate phase-1 branch/PR. Official `main`, the
-`supermimic` worktree, mjlab, installed editable packages and the running
-official reproduction stay unchanged. Keep this PR on the research branch;
-do not merge research changes into official main.
+Use the original `src/supermimic/scripts/train.py` entry point and the unchanged
+`SuperMimicRunner.run()` loop. Research changes live only in the separate
+`supermimic-phy` worktree/branch; official `supermimic`, main and mjlab remain
+frozen. This PR is stacked on phase 1 and is not merged into official main.
 
-## Loop and information boundary
+`--runner.force-conditioned True` opts into four connections:
 
-`python -m supermimic.phy.train` runs:
+- Create ForceTrackingEnv and record actual per-step wrench, explicit pre-reset
+  next state and command-transition validity. Preserve real termination flags
+  before manual reset; pad histories at reset/teleport boundaries.
+- Build phase-1 ForceDynamics/ForceWorldModelLearner and force-aware replay.
+- Use a transition hook in WorldModelEnv: an exogenous H+1 pulse plan continues
+  the sampled replay force/timers, then samples future pulses outside capture.
+  Each prediction uses its matching force. Existing reward, soft termination,
+  actor-critic/BPTT, gradient clipping, update ratio and reset sampling remain
+  shared. Only the critic additionally sees current force/timers; the actor
+  never receives the force plan. WM parameters freeze during policy updates,
+  while state/action derivatives remain available.
+- Keep original W&B logging and world_model.pt/actor.pt/critic.pt saving.
+  ForceDynamics accepts omitted wrench as zero for existing force-free playback.
 
-1. Reset MuJoCo, collect a fresh replay warmup with the current actor, and
-   update normalizers outside inference mode.
-2. Bootstrap the force-conditioned world model (new runs only).
-3. Repeatedly collect with the **updated actor**, update the world model from
-   explicit force-labelled targets, and update actor/critic through forced
-   differentiable model rollouts.
-4. Save complete learned/optimizer state and optionally a chronological replay
-   snapshot. Reload into a fresh process to resume or evaluate in MuJoCo.
+There is no separate scheduler, training CLI, or optimizer checkpoint system.
+Disabled force mode takes the original path. The disturbance enabled flag now
+also correctly zeroes physical and imagined forces during zero-force checks.
 
-Production changes are confined to `supermimic.phy`. The official reward,
-termination probabilities, sensor history, actor architecture, BPTT survival
-masking, gradient clipping and critic/GAE implementation are reused. This pilot
-uses uniform motion sampling and a small network/budget; it is not a matched
-scientific comparison to the full official reproduction.
+Small verification uses the existing entry: 16 envs, 81 control steps, buffer
+128, replay ratio 1, WM batch 16/window 8, policy batch 16/horizon 4, two hidden
+layers of 64, proprio history 3. This exercises roughly ten alternating update
+calls and passes both CUDA Graph capture boundaries. Force is pelvis-only,
+[-10,10] N per axis, zero torque; no formal experiments or robustness claims.
 
-Real forces are written before all physics substeps. Explicit next states are
-cloned before manual resets; command teleports are flagged invalid. Online WM
-windows never cross reset or score invalid targets. Sensor-history windows
-also pad at invalid-command boundaries. Each stored transition has the actor
-update-call number, showing which policy collected it. Snapshot files contain
-only filled frames in chronological order, with force/time/body conventions.
+Tests `test_phy_pipeline.py` observe the unmodified run loop while invoking the
+actual CLI, check nonzero WM/actor gradients and parameter updates, frozen WM
+weights during policy updates, newer actor weights used for collection, finite
+force-labelled replay, and original saved model files. A separate pytest
+process reconstructs models/config from those files and runs 32 forced and 32
+zero-force simulator steps with normalization/learning disabled. No optimizer
+resume is added; saved model reload is the existing checkpoint contract.
 
-A policy rollout starts with the replay snapshot's actual current force and
-pulse timers. Outside CUDA Graph capture, an independent generator continues
-that pulse and samples H future force/timer states. No gradients go into this
-exogenous sampling. Every dynamics step receives its matching world-frame
-wrench, rotated by the **predicted** current orientation inside ForceDynamics.
-The actor receives only its original goals and observation history. The critic
-also receives normalized **current** force and active/cooldown timers, so its
-bootstrap is conditioned on the correct disturbance state. Neither network
-receives the future force plan. H+1 states cover the final bootstrap.
-
-During policy updates, world-model/representation parameters are frozen while
-state/action Jacobians remain differentiable. Runtime checks require finite
-metrics, changed WM/actor weights, unchanged frozen WM weights, and subsequent
-collection with a newer actor. CUDA Graph state includes the timer scale.
-The official CapturedUpdate warmup/capture execution semantics are preserved;
-reported update-call counts are not claimed to be exact optimizer step counts.
-
-The disturbance `enabled` flag is now enforced by both physical and imagined
-forces. Setting it false clears the actual wrench; it is used for zero-force
-evaluation without changing learned network geometry.
-
-## Checkpoints and resume
-
-Atomic checkpoints contain config, source commit, motion hash, WM/context,
-actor, critic, every optimizer, progress counters and Torch/Python/NumPy/force
-generator RNG state. Loading verifies exact model and optimizer state equality
-before continuing. A tensor learning rate is moved to the correct device
-before rebuilding CUDA Graphs. Phase-1 WM-only files are deliberately rejected
-as full training checkpoints.
-
-Simulator integrator/contact state and replay are **not** restored. Resume
-creates a fresh simulator, resets sensor history, and refills replay with the
-restored actor before further learning. It preserves learned/optimizer state
-and progress, not bitwise continuation of a physical trajectory. A new resume
-output directory keeps the original checkpoint intact. Training resume requires
-the same motion contents. Evaluation performs no learning or normalization
-updates and verifies that all saved learned state remains unchanged.
-
-## Small GPU verification
-
-Use the active runtime and paths from workspace `.env`. Run only on the
-research GPU, with imports explicitly pointing at this checkout. Do not run
-`uv sync` or reinstall the editable package into the baseline environment.
-
-```bash
-source "$REMOTE_ACTIVE_ENV_FILE"
-cd "$REMOTE_PHY_REPO"
-export PYTHONPATH="$PWD/src"
-export CUDA_VISIBLE_DEVICES="$REMOTE_GPU1_UUID"
-
-uv run --project ../supermimic --no-sync python -m supermimic.phy.train \
-  --motion-file "$REMOTE_DATA_DIR/lafan1/npz/run1_subject5.npz" \
-  --output-dir "$REMOTE_CHECKPOINT_DIR/phy/loop-pilot/train" \
-  --replay-output "$REMOTE_DATA_DIR/phy/loop-pilot/train.pt"
-
-uv run --project ../supermimic --no-sync python -m supermimic.phy.train \
-  --resume "$REMOTE_CHECKPOINT_DIR/phy/loop-pilot/train/checkpoint.pt" \
-  --cycles 4 --output-dir "$REMOTE_CHECKPOINT_DIR/phy/loop-pilot/resume" \
-  --replay-output "$REMOTE_DATA_DIR/phy/loop-pilot/resume.pt"
-
-uv run --project ../supermimic --no-sync python -m supermimic.phy.train \
-  --evaluate "$REMOTE_CHECKPOINT_DIR/phy/loop-pilot/resume/checkpoint.pt" \
-  --output-dir "$REMOTE_EXPERIMENT_DIR/phy/loop-pilot/eval-forced"
-
-uv run --project ../supermimic --no-sync python -m supermimic.phy.train \
-  --evaluate "$REMOTE_CHECKPOINT_DIR/phy/loop-pilot/resume/checkpoint.pt" \
-  --force-mode zero --output-dir "$REMOTE_EXPERIMENT_DIR/phy/loop-pilot/eval-zero"
-```
-
-Default verification: 16 real envs, 32 warmup control steps, 4 initial WM
-update calls, 6 collect/WM/policy cycles (8 real steps each), batches 16, WM
-window 8 frames, policy horizon 4, proprio history 3, two 64-wide hidden layers.
-Pelvis force is [-10,10] N per axis, zero torque, active 2-4 steps, cooldown 2-6,
-25% zero events. These are plumbing settings, not validated force curricula.
-The CLI bounds budgets to small pilots; no formal experiments are scheduled.
-
-Before server validation, push and open a stacked PR targeting the phase-1
-research branch. On the exact PR SHA run official Ruff checks and full pytest
-(set `SUPERMIMIC_PHY_GPU_MOTION` for the controlled real-G1 force test), followed
-by the four fresh-process commands above. Record source SHA, results and
-limitations in the PR. Require WM and policy CUDA Graphs captured in initial
-and resume runs, finite reloaded predictions, frozen WM weights during policy
-updates, and multiple actor versions present in stored replay.
-
-This establishes a working small training loop, checkpoint continuation and
-simulator inference. It does not establish long-run stability, tracking quality,
-force prediction gains, OOD/multi-body/torque generalization or robustness.
+Use the existing persistent runtime without uv sync/reinstall. Set PYTHONPATH
+to this research checkout's src and CUDA_VISIBLE_DEVICES to the research GPU
+UUID from workspace .env. Keep motion data in REMOTE_DATA_DIR, model files in
+REMOTE_CHECKPOINT_DIR and logs/reports in REMOTE_EXPERIMENT_DIR. Push/open PR
+before server checks, and record exact tested SHA and results there.

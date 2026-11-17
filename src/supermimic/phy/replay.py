@@ -11,13 +11,6 @@ from supermimic.replay_buffer import ReplayBuffer
 
 
 class ForceReplayBuffer(ReplayBuffer):
-  def snapshot(self):
-    base = self._step if self.num_transitions == self.buffer_size else 0
-    slots = (
-      base + torch.arange(self.num_transitions, device=self.device)
-    ) % self.buffer_size
-    return self._storage[:, slots].to("cpu").to_dict()
-
   def sample(self, sequence_length, batch_size):
     if sequence_length == 1:
       return super().sample(sequence_length, batch_size)

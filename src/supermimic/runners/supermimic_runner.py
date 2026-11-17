@@ -24,6 +24,10 @@ from supermimic.learners.policy_learner import (
 )
 from supermimic.learners.wm_learner import WorldModelLearner, WorldModelLearnerCfg
 from supermimic.models import Dynamics, MultiEncoderAE, build_mlp
+from supermimic.phy.disturbances import ExternalWrenchCfg
+from supermimic.phy.dynamics import ForceDynamics, ForceWorldModelLearner
+from supermimic.phy.replay import ForceReplayBuffer
+from supermimic.phy.rollout import ForcePolicyLearner, ForceWorldModelEnv
 from supermimic.replay_buffer import FieldSpec, ReplayBuffer
 from supermimic.representations import StateRepresentation, create_representation
 from supermimic.runners.exporter import export_actor_as_onnx
@@ -69,6 +73,8 @@ ActorCriticCfg = Annotated[
 
 @dataclass
 class SuperMimicRunnerCfg(BaseRunnerCfg):
+  force_conditioned: bool = False
+  disturbance: ExternalWrenchCfg = field(default_factory=ExternalWrenchCfg)
   max_iterations: int = 1000000
   replay_ratio: int = 16
   latent_dim: int = 32
@@ -158,13 +164,16 @@ def build_world_model(cfg: BaseRunnerCfg, env, device: str) -> WorldModel:
   )
 
   action_scale, action_offset = extract_action_scale_offset(env)
-  dynamics = Dynamics(
+  forced = getattr(cfg, "force_conditioned", False)
+  dynamics_cls = ForceDynamics if forced else Dynamics
+  dynamics = dynamics_cls(
     representation,
     num_actions,
     sim_ctx_dim,
     action_scale,
     action_offset,
     hidden_dims=cfg.dynamics_hidden_dims,
+    **({"num_bodies": len(cfg.disturbance.body_names)} if forced else {}),
   ).to(device)
 
   return WorldModel(
@@ -276,13 +285,16 @@ class BaseRunner[CfgT: BaseRunnerCfg]:
     self.motion_cmd = self.env.unwrapped.command_manager.get_term("motion")
     self.motion = self.motion_cmd.motion
 
-    self.replay_buffer = ReplayBuffer(
+    forced = getattr(self.cfg, "force_conditioned", False)
+    buffer_cls = ForceReplayBuffer if forced else ReplayBuffer
+    self.replay_buffer = buffer_cls(
       schema=self._buffer_schema(),
       buffer_size=self.cfg.buffer_size,
       num_envs=self.env.num_envs,
       device=self.device,
     )
-    self.world_model_learner = WorldModelLearner(
+    learner_cls = ForceWorldModelLearner if forced else WorldModelLearner
+    self.world_model_learner = learner_cls(
       self._dynamics, self._representation, self.cfg.wm, device=self.device
     )
 
@@ -389,6 +401,13 @@ class BaseRunner[CfgT: BaseRunnerCfg]:
         self._representation.proprio_obs_dim(self._num_actions)
       )
     schema["sim_ctx"] = FieldSpec(self._sim_context.output_dim)
+    if getattr(self.cfg, "force_conditioned", False):
+      schema.update(
+        next_state=FieldSpec(self._representation.full_state_dim),
+        external_wrench_w=FieldSpec(len(self.cfg.disturbance.body_names) * 6),
+        disturbance_state=FieldSpec(2, torch.long),
+        transition_valid=FieldSpec(dtype=torch.bool),
+      )
     return schema
 
   def _init_policy(self) -> None:
@@ -419,6 +438,32 @@ class BaseRunner[CfgT: BaseRunnerCfg]:
       torch.zeros(self.env.num_envs, dtype=torch.bool, device=self.device),
     )
     terminated = dones.bool() & ~truncated
+
+    if getattr(self.cfg, "force_conditioned", False):
+      # Preserve physics labels/flags before manual reset can overwrite buffers.
+      rewards, truncated, terminated = (
+        rewards.clone(),
+        truncated.clone(),
+        terminated.clone(),
+      )
+      extras = extras.copy()
+      valid = motion_cmd.time_steps == motion_times + 1
+      extra_fields = dict(extra_fields or {}) | {
+        "next_state": next_obs["full_state"].clone(),
+        "transition_valid": valid.clone(),
+        **extras["external_disturbance"],
+      }
+      manager = self.env.unwrapped.termination_manager
+      extras["force_step_flags"] = {
+        "terminated": manager.terminated.clone(),
+        "truncated": truncated,
+        "clip_end": manager.get_term("motion_end").clone(),
+      }
+      boundary = dones.bool() | ~valid
+      if boundary.any():
+        _, reset_extras = self.env.unwrapped.reset(env_ids=boundary.nonzero().flatten())
+        extras["log"] = reset_extras.get("log", {})
+      next_obs, dones = self.env.get_observations(), boundary.long()
 
     fields: dict[str, torch.Tensor] = {
       "state": curr_states,
@@ -515,6 +560,8 @@ class SuperMimicRunner(BaseRunner[SuperMimicRunnerCfg]):
     ):
       print(f"  {ts.name}: [{lo}, {hi}) — goal_dim={ts.goal_dim}")
     _, critic_input_dim = self._policy_input_dims()
+    if self.cfg.force_conditioned:
+      critic_input_dim += len(self.cfg.disturbance.body_names) * 6 + 2
     critic = build_mlp(
       critic_input_dim,
       self.cfg.critic_hidden_dims,
@@ -523,7 +570,10 @@ class SuperMimicRunner(BaseRunner[SuperMimicRunnerCfg]):
 
     policy_cfg = self.cfg.policy
 
-    self.wm_env = MultiTaskWorldModelEnv(
+    wm_env_cls = (
+      ForceWorldModelEnv if self.cfg.force_conditioned else MultiTaskWorldModelEnv
+    )
+    self.wm_env = wm_env_cls(
       dynamics=self._dynamics,
       representation=self._representation,
       env=self.env,
@@ -533,6 +583,15 @@ class SuperMimicRunner(BaseRunner[SuperMimicRunnerCfg]):
       history_length=self.cfg.history_length,
       termination_softness=self.cfg.termination_softness,
       device=self.device,
+      **(
+        {
+          "disturbance": self.cfg.disturbance,
+          "horizon": policy_cfg.horizon,
+          "plan_seed": self.cfg.disturbance.seed + 1,
+        }
+        if self.cfg.force_conditioned
+        else {}
+      ),
     )
     if torch.cuda.is_available():
       self.wm_env.step = torch.compile(self.wm_env.step)
@@ -541,7 +600,10 @@ class SuperMimicRunner(BaseRunner[SuperMimicRunnerCfg]):
     self._configure_reset_sampling()
 
     if isinstance(policy_cfg, ActorCriticPolicyLearnerCfg):
-      self.policy_learner = ActorCriticPolicyLearner(
+      policy_learner_cls = (
+        ForcePolicyLearner if self.cfg.force_conditioned else ActorCriticPolicyLearner
+      )
+      self.policy_learner = policy_learner_cls(
         actor, critic, self.wm_env, policy_cfg, device=self.device
       )
     else:
@@ -624,14 +686,23 @@ class SuperMimicRunner(BaseRunner[SuperMimicRunnerCfg]):
         extra_fields=extra_fields,
       )
       self._advance_sim_history(next_obs["actor"].to(self.device), dones)
-      terminated = self.env.unwrapped.termination_manager.terminated
+      force_flags = extras.get("force_step_flags")
+      terminated = (
+        force_flags["terminated"]
+        if force_flags
+        else self.env.unwrapped.termination_manager.terminated
+      )
       self.logger.process_env_step(rewards, terminated, extras)
 
       if self._sampler is not None:
         # A failure on a step that also times out counts as the time-out.
         manager = self.env.unwrapped.termination_manager
-        truncated = manager.time_outs.to(self.device, torch.bool)
-        clip_end = manager.get_term("motion_end").to(self.device, torch.bool)
+        truncated = (force_flags["truncated"] if force_flags else manager.time_outs).to(
+          self.device, torch.bool
+        )
+        clip_end = (
+          force_flags["clip_end"] if force_flags else manager.get_term("motion_end")
+        ).to(self.device, torch.bool)
         weights = self._sampler.record(
           motion_times,
           rewards,
