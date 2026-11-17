@@ -80,6 +80,13 @@ fit that passes the CUDA Graph warmup/capture boundary. Confirm the imported
 `supermimic.__file__` resolves to the research checkout and baseline Git remains
 clean. Record commands, SHA, reports and limitations in the PR.
 
+Set `SUPERMIMIC_PHY_GPU_MOTION` to a persistent local motion path when running
+pytest on GPU 1. This enables a G1 physical-response probe: three worlds have
+identical initial state, action and physical parameters, with 0/+100/-100 N
+pelvis force. Check the actual recorded force and signed next-velocity response.
+Independent forced/zero collections may diverge under GPU contact dynamics;
+do not treat two such collections as an equal-state causal comparison.
+
 Phase 2 is NOT implemented here: disturbance schedules inside differentiable
 policy rollouts and alternating world-model/policy updates. Do not infer
 closed-loop robustness from phase-1 prediction metrics. Formal comparisons,

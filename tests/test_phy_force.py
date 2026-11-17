@@ -1,5 +1,8 @@
 """Force timing, frame convention, reset boundaries and information ablation."""
 
+import json
+import os
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -149,3 +152,64 @@ def test_command_teleport_invalidates_even_the_last_scored_target():
 def test_invalid_disturbance_rejected(change):
   with pytest.raises(ValueError):
     ExternalWrenchCfg(**change).validate()
+
+
+@pytest.mark.skipif(
+  not os.environ.get("SUPERMIMIC_PHY_GPU_MOTION"),
+  reason="set SUPERMIMIC_PHY_GPU_MOTION to a local motion for the G1 GPU probe",
+)
+def test_g1_force_changes_physics_with_identical_initial_state_and_action():
+  import mjlab.tasks  # noqa: F401
+  from mjlab.rl import RslRlVecEnvWrapper
+  from mjlab.tasks.registry import load_env_cfg
+
+  import supermimic.tasks  # noqa: F401
+  from supermimic.phy.environment import ForceTrackingEnv
+  from supermimic.scripts.train_utils import setup_device
+
+  device = setup_device("cuda:0")
+  cfg = load_env_cfg("SuperMimic-GenCoord-G1", play=True)
+  cfg.seed = 0
+  cfg.scene.num_envs = 3
+  cfg.events = {}  # Identical physical parameters in every world.
+  cfg.auto_reset = False
+  cfg.commands["motion"].motion_file = os.environ["SUPERMIMIC_PHY_GPU_MOTION"]
+  cfg.commands["motion"].joint_position_range = (0.0, 0.0)
+  disturbance = ExternalWrenchCfg(
+    enabled=True,
+    force_range=(0, 0),
+    cooldown_steps=(0, 0),
+    zero_probability=0,
+  )
+  env = RslRlVecEnvWrapper(ForceTrackingEnv(cfg, device, disturbance))
+  try:
+    obs, _ = env.reset()
+    state = obs["full_state"].clone()
+    torch.testing.assert_close(state, state[:1].expand_as(state), atol=1e-5, rtol=1e-5)
+    controller = env.unwrapped.external_disturbance
+    controller.wrench.zero_()
+    controller.wrench[1, 0, 0] = 100.0
+    controller.wrench[2, 0, 0] = -100.0
+    controller.remaining.fill_(2)  # Keep these prescribed pulses in prepare().
+    next_obs, _, _, extras = env.step(torch.zeros(3, env.num_actions, device=device))
+    applied = extras["external_disturbance"]["external_wrench_w"]
+    torch.testing.assert_close(
+      applied[:, 0], torch.tensor([0.0, 100, -100], device=device)
+    )
+    assert applied[:, 1:].count_nonzero() == 0
+    next_state = next_obs["full_state"]
+    assert torch.isfinite(next_state).all()
+    root_vx = next_state[:, 7 + env.num_actions]
+    assert root_vx[1] > root_vx[0] + 1e-4
+    assert root_vx[2] < root_vx[0] - 1e-4
+    report = {
+      "physical_response_check_passed": True,
+      "comparison": "same batch, identical initial full states and zero actions; DR off",
+      "force_x_N": applied[:, 0].tolist(),
+      "next_root_vx_m_s": root_vx.tolist(),
+      "control_dt": env.unwrapped.step_dt,
+    }
+    if path := os.environ.get("SUPERMIMIC_PHY_FORCE_REPORT"):
+      Path(path).write_text(json.dumps(report, indent=2) + "\n")
+  finally:
+    env.close()
