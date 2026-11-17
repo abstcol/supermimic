@@ -87,7 +87,11 @@ def fit(args):
     raise ValueError("dataset needs separate train/validation environments")
   train_envs, val_envs = torch.arange(split), torch.arange(split, n)
   starts = valid_window_starts(
-    raw["terminated"], raw["truncated"], train_envs, args.horizon
+    raw["terminated"],
+    raw["truncated"],
+    train_envs,
+    args.horizon,
+    raw["transition_valid"],
   )
   data = TensorDict(raw, batch_size=[n, steps]).to(args.device)
   learners = {
@@ -117,7 +121,8 @@ def fit(args):
   report = {
     "scope": "phase1 small functional pilot; no robustness or paper reproduction claim",
     "source_commit": subprocess.check_output(
-      ["git", "rev-parse", "HEAD"], text=True
+      ["git", "-C", str(Path(__file__).resolve().parents[3]), "rev-parse", "HEAD"],
+      text=True,
     ).strip(),
     "dataset_sha256": hashlib.sha256(args.dataset.read_bytes()).hexdigest(),
     "dataset": str(args.dataset),
@@ -137,7 +142,9 @@ def fit(args):
     length = horizon + 1
     if length > steps:
       continue
-    valid = valid_window_starts(raw["terminated"], raw["truncated"], val_envs, length)
+    valid = valid_window_starts(
+      raw["terminated"], raw["truncated"], val_envs, length, raw["transition_valid"]
+    )
     eval_td = sample_windows(data, valid, length, args.eval_batch_size, eval_rng)
     forced = eval_td["external_wrench_w"][:, :horizon].abs().sum((-1, -2)) > 0
     groups = {"all": torch.ones_like(forced), "forced": forced, "zero": ~forced}

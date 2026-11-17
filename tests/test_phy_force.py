@@ -129,6 +129,14 @@ def test_windows_do_not_cross_reset_and_holdout_environments_are_separate():
     valid_window_starts(terminated, truncated, torch.tensor([0]), 10)
 
 
+def test_command_teleport_invalidates_even_the_last_scored_target():
+  done = torch.zeros(1, 8, dtype=torch.bool)
+  valid_transition = torch.ones_like(done)
+  valid_transition[:, 3] = False
+  starts = valid_window_starts(done, done, torch.tensor([0]), 4, valid_transition)
+  assert set(starts[:, 1].tolist()) == {0, 4}
+
+
 @pytest.mark.parametrize(
   "change",
   [

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import subprocess
 from dataclasses import asdict
 from pathlib import Path
 
@@ -107,6 +108,8 @@ def collect(args):
           "terminated": done.bool() & ~timeouts,
           "truncated": timeouts.clone(),
           "motion_time": times,
+          # MotionCommand may teleport on clip wrap even with auto_reset off.
+          "transition_valid": (motion_cmd.time_steps == times + 1).clone(),
           "reward": reward.clone(),
           **extras["external_disturbance"],
         }
@@ -124,6 +127,10 @@ def collect(args):
     robot = env.unwrapped.scene["robot"]
     metadata = {
       "schema_version": 1,
+      "source_commit": subprocess.check_output(
+        ["git", "-C", str(Path(__file__).resolve().parents[3]), "rev-parse", "HEAD"],
+        text=True,
+      ).strip(),
       "scope": "phase1 functional pilot; not policy training",
       "task": "SuperMimic-GenCoord-G1",
       "seed": args.seed,
@@ -145,7 +152,8 @@ def collect(args):
       "decimation": cfg.decimation,
       "disturbance": env.unwrapped.external_disturbance.metadata(env.unwrapped.step_dt),
       "env_config": asdict(cfg),
-      "terminal_next_state": "pre-reset; manual reset after storing transition",
+      "terminal_next_state": "pre-reset except command teleports, marked transition_valid=False",
+      "invalid_command_transitions": int((~data["transition_valid"]).sum()),
       "nonzero_force_fraction": float(
         (data["external_wrench_w"].abs().sum(-1) > 0).float().mean()
       ),

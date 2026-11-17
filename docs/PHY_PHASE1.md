@@ -34,7 +34,10 @@ reset; never log the next pulse or infer force from a modified velocity.
 
 Store explicit `(state,action,sim_ctx,wrench,next_state,terminated,truncated)`
 plus motion frame, reward and disturbance timer state. Disable auto-reset so
-the label is the true terminal state; manually reset only after cloning it.
+the label precedes environment reset; manually reset only after cloning it.
+Motion-command wraparound can still teleport the state. Mark such transitions
+`transition_valid=False` using frame continuity and exclude every affected
+scored target, including a terminal one. Other terminal targets remain valid.
 The sidecar records body slots, coordinates, units, dt, physical configuration,
 actor and motion hashes. Data and outputs must live in persistent workspace
 `data`, `checkpoints` and `experiments` directories, not Git.
